@@ -21,7 +21,7 @@ call .venv\Scripts\activate.bat
 
 :: Run the application
 set PYTHONPATH=%~dp0
-python -m src.cli
+python -m src.main --mode gui
 
 :: Keep the window open if the app crashes or exits
 echo.

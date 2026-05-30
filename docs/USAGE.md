@@ -94,6 +94,19 @@ Key values:
 - Audio channels: `1`
 - Max recording length: `30` seconds (`THERAPIST_MAX_RECORD_S`)
 - Send audio to therapist model: enabled (`THERAPIST_SEND_AUDIO_TO_MODEL`)
+- Model context window: `16384` tokens (`THERAPIST_NUM_CTX`)
+
+Rolling context compaction keeps long sessions inside the model's window. When the
+live conversation tail grows past a threshold, the oldest user/assistant pairs are
+condensed into a single running summary (kept in-context) and the detail is preserved
+in the notebook under the `session_log` category for later retrieval. The system
+prompt, pinned notes, and recalled-memory messages are never evicted.
+
+- `THERAPIST_CONTEXT_COMPACTION` (default `1`): enable/disable rolling compaction.
+- `THERAPIST_CONTEXT_BUDGET_RATIO` (default `0.5`): tail budget as a fraction of `num_ctx`.
+- `THERAPIST_CONTEXT_TRIGGER_RATIO` (default `0.9`): compact when the tail reaches this fraction of the budget.
+- `THERAPIST_CONTEXT_KEEP_RATIO` (default `0.5`): retain the most recent pairs under this fraction of the budget after compacting.
+- `THERAPIST_CONTEXT_PERSIST_NOTEBOOK` (default `1`): also write the running summary to the notebook.
 
 The prompt files live under `prompts/`:
 

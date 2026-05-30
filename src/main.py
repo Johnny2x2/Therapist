@@ -3,20 +3,92 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import queue
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ._cuda_dll import preload_cuda_dlls
+
+# Pin a consistent cuDNN 9.10 / cuBLAS stack before torch or ctranslate2 load
+# their own, so faster-whisper doesn't hit "cudnnGetLibConfig. Error code 127".
+preload_cuda_dlls()
+
 from .config import AppConfig
 from .librarian import Librarian, LibrarianRunReport
-from .llm_therapist import OllamaClient, TherapistEngine
+from .llm_therapist import OllamaClient, TherapistEngine, estimate_text_tokens
 from .memory import MemoryStore
 from .mood import MoodLog
 from .notebook import NotebookStore
 from .safety import SafetyMonitor, SafetyResult
 from .stt_listener import SpeechListener
 from .tts_speaker import TextSpeaker
+
+
+_PARAGRAPH_BREAK = re.compile(r"(?:\r?\n\s*){2,}")
+
+
+def _drain_complete_paragraphs(buffer: str) -> tuple[List[str], str]:
+    ready: List[str] = []
+    cursor = 0
+    for match in _PARAGRAPH_BREAK.finditer(buffer):
+        chunk = buffer[cursor:match.start()].strip()
+        if chunk:
+            ready.append(chunk)
+        cursor = match.end()
+    return ready, buffer[cursor:]
+
+
+class _StreamingReplySpeaker:
+    def __init__(self, speaker: TextSpeaker, on_status: Optional[Callable[[str], None]] = None):
+        self._speaker = speaker
+        self._on_status = on_status
+        self._buffer = ""
+        self._error: Optional[Exception] = None
+        self._announced = False
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._worker = threading.Thread(target=self._run, name="tts-stream", daemon=True)
+        self._worker.start()
+
+    def push_token(self, token: str) -> None:
+        ready, self._buffer = _drain_complete_paragraphs(self._buffer + token)
+        for chunk in ready:
+            self._enqueue(chunk)
+
+    def finish(self) -> None:
+        tail = self._buffer.strip()
+        self._buffer = ""
+        if tail:
+            self._enqueue(tail)
+        self._queue.put(None)
+        self._worker.join()
+        if self._error is not None:
+            raise self._error
+
+    def cancel(self) -> None:
+        self._speaker.stop()
+        self._queue.put(None)
+        self._worker.join(timeout=0.2)
+
+    def _enqueue(self, chunk: str) -> None:
+        if not self._announced and self._on_status is not None:
+            self._on_status("Speaking response...")
+            self._announced = True
+        self._queue.put(chunk)
+
+    def _run(self) -> None:
+        while True:
+            chunk = self._queue.get()
+            if chunk is None:
+                return
+            try:
+                self._speaker.speak_text(chunk)
+            except Exception as exc:
+                self._error = exc
+                self._speaker.stop()
+                return
 
 
 @dataclass
@@ -45,6 +117,7 @@ class TherapistApp:
         self._partial_path: Path = config.session_dir / f"{self.session_id}.partial.jsonl"
         self._lock = threading.Lock()
         self._closed = False
+        self._compaction_note_id: Optional[str] = None
 
     # ------------------------------------------------------------------ memory
     def warm_memory(self, seed_text: str) -> None:
@@ -179,7 +252,9 @@ class TherapistApp:
             print("Therapist: ", end="")
         if on_status:
             on_status("Generating response...")
+        self._maybe_compact_context(user_text, on_status)
         tokens: List[str] = []
+        speech_stream = _StreamingReplySpeaker(self.speaker, on_status) if speak else None
         try:
             for token in self.engine.generate_reply(
                 user_text,
@@ -194,14 +269,27 @@ class TherapistApp:
                 if on_token:
                     on_token(token)
                 tokens.append(token)
+                if speech_stream is not None:
+                    speech_stream.push_token(token)
+        except Exception:
+            if speech_stream is not None:
+                speech_stream.cancel()
+            raise
         finally:
             self._cleanup_turn_audio(audio_path)
         if emit_console:
             print()
         reply = "".join(tokens)
-        if on_status:
-            on_status("Speaking response..." if speak else "Response ready.")
-        self._emit_reply(reply, speak)
+        if speech_stream is not None:
+            self._append_turn(TurnRecord(role="assistant", content=reply, timestamp=_now_iso()))
+            try:
+                speech_stream.finish()
+            except Exception as exc:
+                print(f"[tts disabled: {type(exc).__name__}: {exc}]")
+        else:
+            if on_status:
+                on_status("Speaking response..." if speak else "Response ready.")
+            self._emit_reply(reply, speak)
         if on_status:
             on_status("Ready.")
         return reply
@@ -213,6 +301,51 @@ class TherapistApp:
             p = Path(audio_path)
             if p.exists():
                 p.unlink()
+        except Exception:
+            pass
+
+    def _maybe_compact_context(
+        self,
+        user_text: str,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        """Roll older conversation turns into a running summary when the live
+        context grows past the configured budget, preserving the condensed detail
+        in the notebook for later retrieval."""
+        if not self.config.context.enabled:
+            return
+        try:
+            result = self.engine.compact_context(
+                projected_extra_tokens=estimate_text_tokens(user_text)
+            )
+        except Exception:
+            return
+        if result is None:
+            return
+        if self.config.context.persist_notebook:
+            self._persist_compaction_note(result.summary)
+        if on_status:
+            on_status("Condensed earlier conversation to stay within context.")
+
+    def _persist_compaction_note(self, summary: str) -> None:
+        if not summary:
+            return
+        title = f"Session {self.session_id} \u2014 running context summary"
+        try:
+            if self._compaction_note_id is None:
+                meta = self.notebook.write_note(
+                    category="session_log",
+                    title=title,
+                    body=summary,
+                    tags=["auto-compaction"],
+                    source_session=self.session_id,
+                )
+                self._compaction_note_id = (meta or {}).get("id")
+            else:
+                self.notebook.update_note(
+                    self._compaction_note_id,
+                    replace_body=summary,
+                )
         except Exception:
             pass
 

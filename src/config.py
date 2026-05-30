@@ -9,6 +9,29 @@ from typing import Dict, List
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = ROOT_DIR / "prompts"
 DATA_DIR = ROOT_DIR / ".data"
+DEFAULT_CHATTERBOX_REF_WAV = ROOT_DIR / "gemm-blue-dog.wav"
+
+
+def resolve_device(preference: str = "auto") -> str:
+    """Resolve a compute device string.
+
+    ``cpu``/``cuda``/``mps`` (optionally with an index like ``cuda:0``) are
+    returned as-is. ``auto`` (or empty) detects CUDA, then Apple MPS, falling
+    back to CPU. Detection never raises: if torch is missing we return ``cpu``.
+    """
+    pref = (preference or "auto").strip().lower()
+    if pref and pref != "auto":
+        return pref
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
 
 
 def _read_prompt(path: Path, fallback: str) -> str:
@@ -40,25 +63,37 @@ class AudioSettings:
     tts_language: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_LANG", "en"))
     tts_steps: int = field(default_factory=lambda: int(os.getenv("THERAPIST_TTS_STEPS", "16")))
     tts_speed: float = field(default_factory=lambda: float(os.getenv("THERAPIST_TTS_SPEED", "1.15")))
+    # TTS backend selection: "supertonic" (default) or "chatterbox" (ResembleAI).
+    tts_backend: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_BACKEND", "supertonic").strip().lower())
+    # Chatterbox-only options. Default to the secondary GPU on this workstation.
+    chatterbox_device: str = field(default_factory=lambda: os.getenv("THERAPIST_CHATTERBOX_DEVICE", "cuda:1").strip().lower())
+    chatterbox_exaggeration: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CHATTERBOX_EXAGGERATION", "0.5")))
+    chatterbox_cfg_weight: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CHATTERBOX_CFG", "0.5")))
+    chatterbox_ref_wav: str = field(
+        default_factory=lambda: os.getenv(
+            "THERAPIST_CHATTERBOX_REF_WAV",
+            str(DEFAULT_CHATTERBOX_REF_WAV) if DEFAULT_CHATTERBOX_REF_WAV.exists() else "",
+        ).strip()
+    )
     # Multimodal voice turns: attach the captured WAV to the therapist model.
-    send_audio_to_model: bool = field(default_factory=lambda: os.getenv("THERAPIST_SEND_AUDIO_TO_MODEL", "1") != "0")
+    send_audio_to_model: bool = field(default_factory=lambda: os.getenv("THERAPIST_SEND_AUDIO_TO_MODEL", "0") != "0")
     model_audio_max_seconds: float = field(default_factory=lambda: float(os.getenv("THERAPIST_MODEL_AUDIO_MAX_S", "30")))
     audio_fallback_text: bool = field(default_factory=lambda: os.getenv("THERAPIST_AUDIO_FALLBACK_TEXT", "1") != "0")
 
 
 @dataclass
 class ModelSettings:
-    therapist_model: str = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"
-    safety_model: str = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"
+    therapist_model: str = "deepseek-r1:14b"
+    safety_model: str = "deepseek-r1:14b"
     embedding_model: str = "nomic-embed-text:latest"
-    librarian_model: str = field(default_factory=lambda: os.getenv("THERAPIST_LIBRARIAN_MODEL", "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"))
+    librarian_model: str = field(default_factory=lambda: os.getenv("THERAPIST_LIBRARIAN_MODEL", "deepseek-r1:14b"))
     whisper_model: str = "distil-large-v3"
     tts_model: str = "Supertone/supertonic-3"
 
 
 @dataclass
 class SafetySettings:
-    enabled: bool = field(default_factory=lambda: os.getenv("THERAPIST_SAFETY_ENABLED", "1") != "0")
+    enabled: bool = field(default_factory=lambda: os.getenv("THERAPIST_SAFETY_ENABLED", "0") != "0")
 
 
 @dataclass
@@ -79,6 +114,23 @@ class MemorySettings:
 
 
 @dataclass
+class ContextSettings:
+    """Rolling context-window compaction settings.
+
+    The live conversation tail is kept under ``budget_ratio * num_ctx`` tokens.
+    When it reaches ``trigger_ratio`` of that budget, the oldest user/assistant
+    pairs are condensed into a single running summary and evicted, retaining the
+    most recent pairs under ``keep_ratio`` of the budget.
+    """
+
+    enabled: bool = field(default_factory=lambda: os.getenv("THERAPIST_CONTEXT_COMPACTION", "1") != "0")
+    budget_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_BUDGET_RATIO", "0.5")))
+    trigger_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_TRIGGER_RATIO", "0.9")))
+    keep_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_KEEP_RATIO", "0.5")))
+    persist_notebook: bool = field(default_factory=lambda: os.getenv("THERAPIST_CONTEXT_PERSIST_NOTEBOOK", "1") != "0")
+
+
+@dataclass
 class AppConfig:
     profile: str = field(default_factory=lambda: os.getenv("THERAPIST_PROFILE", "default"))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
@@ -91,17 +143,18 @@ class AppConfig:
     safety_log_path: Path = field(init=False)
     librarian_log_path: Path = field(init=False)
     keep_alive: str = field(default_factory=lambda: os.getenv("OLLAMA_KEEP_ALIVE", "5m"))
-    num_ctx: int = field(default_factory=lambda: int(os.getenv("THERAPIST_NUM_CTX", "16384")))
+    num_ctx: int = field(default_factory=lambda: int(os.getenv("THERAPIST_NUM_CTX", "8192")))
     audio: AudioSettings = field(default_factory=AudioSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     librarian: LibrarianSettings = field(default_factory=LibrarianSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    context: ContextSettings = field(default_factory=ContextSettings)
     prompts: Dict[str, str] = field(default_factory=dict)
     safety_keywords: List[str] = field(default_factory=list)
     notebook_categories: List[str] = field(default_factory=lambda: [
         "people", "goals", "coping_strategies", "triggers", "events",
-        "reflections", "safety_plan", "values", "homework",
+        "reflections", "safety_plan", "values", "homework", "session_log",
     ])
 
     def __post_init__(self) -> None:
@@ -126,7 +179,7 @@ class AppConfig:
             directory.mkdir(parents=True, exist_ok=True)
         config.prompts = {
             "therapist": _read_prompt(
-                PROMPTS_DIR / "DrRebecca.txt",
+                PROMPTS_DIR / "DrRebeccaUlt.txt",
                 "You are a calm, empathic therapist assistant. Reflect feelings, ask open questions, avoid diagnosis, and do not claim to replace emergency or professional care.",
             ),
             "safety": _read_prompt(
@@ -140,6 +193,10 @@ class AppConfig:
             "librarian": _read_prompt(
                 PROMPTS_DIR / "librarian_system.txt",
                 "You are a background notebook librarian. Use the provided tools to organize notes.",
+            ),
+            "context_summary": _read_prompt(
+                PROMPTS_DIR / "context_summary.txt",
+                "You maintain a running summary of an ongoing therapy conversation. Merge the PREVIOUS SUMMARY with the NEW EXCHANGES into one faithful, factual running summary that preserves people, events, feelings, decisions, homework, coping strategies, triggers, and unresolved threads. Do not add advice or crisis instructions. Output only the summary.",
             ),
         }
         config.safety_keywords = _read_lines(PROMPTS_DIR / "safety_keywords.txt")

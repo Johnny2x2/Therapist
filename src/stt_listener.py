@@ -41,11 +41,29 @@ class SpeechListener:
         self.sounddevice = sounddevice_module
         if self._model is None:
             import os as _os
-            device = _os.getenv("THERAPIST_WHISPER_DEVICE", "cpu")
-            compute_type = _os.getenv("THERAPIST_WHISPER_COMPUTE", "float16" if device == "cuda" else "int8")
-            kwargs = {"device": device, "compute_type": compute_type}
-            if device == "cuda":
-                kwargs["device_index"] = int(_os.getenv("THERAPIST_WHISPER_GPU", "1"))
+
+            from .config import resolve_device
+
+            # Default to CPU: keeping Whisper off the GPU avoids VRAM contention
+            # with the LLM/TTS. Override with THERAPIST_WHISPER_DEVICE=cuda.
+            device = resolve_device(_os.getenv("THERAPIST_WHISPER_DEVICE", "cpu"))
+            on_gpu = device.startswith("cuda")
+            if on_gpu:
+                # Pin the cuDNN 9.10 stack ctranslate2 needs before it loads,
+                # avoiding "cudnnGetLibConfig. Error code 127".
+                from ._cuda_dll import preload_cuda_dlls
+
+                preload_cuda_dlls()
+            compute_type = _os.getenv(
+                "THERAPIST_WHISPER_COMPUTE", "float16" if on_gpu else "int8"
+            )
+            kwargs = {"device": "cuda" if on_gpu else device, "compute_type": compute_type}
+            if on_gpu:
+                # Honor an explicit "cuda:N", else fall back to THERAPIST_GPU_INDEX.
+                if ":" in device:
+                    kwargs["device_index"] = int(device.split(":", 1)[1])
+                else:
+                    kwargs["device_index"] = int(_os.getenv("THERAPIST_GPU_INDEX", "0"))
             self._model = WhisperModel(self.config.models.whisper_model, **kwargs)
         if self._vad_model is None:
             self._vad_model = load_silero_vad()

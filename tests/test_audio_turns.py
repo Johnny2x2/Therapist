@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -68,6 +69,7 @@ def _make_engine(tmp_config, client):
 def test_generate_reply_attaches_audio_to_latest_turn_only(tmp_config, tmp_path):
     wav = tmp_path / "clip.wav"
     _write_wav(wav)
+    tmp_config.audio.send_audio_to_model = True
     client = _FakeAudioClient()
     engine = _make_engine(tmp_config, client)
 
@@ -89,6 +91,7 @@ def test_generate_reply_attaches_audio_to_latest_turn_only(tmp_config, tmp_path)
 def test_generate_reply_falls_back_to_text_when_audio_rejected(tmp_config, tmp_path):
     wav = tmp_path / "clip.wav"
     _write_wav(wav)
+    tmp_config.audio.send_audio_to_model = True
     client = _FakeAudioClient(fail_on_audio=True)
     engine = _make_engine(tmp_config, client)
 
@@ -104,6 +107,7 @@ def test_generate_reply_falls_back_to_text_when_audio_rejected(tmp_config, tmp_p
 def test_generate_reply_raises_when_fallback_disabled(tmp_config, tmp_path):
     wav = tmp_path / "clip.wav"
     _write_wav(wav)
+    tmp_config.audio.send_audio_to_model = True
     tmp_config.audio.audio_fallback_text = False
     client = _FakeAudioClient(fail_on_audio=True)
     engine = _make_engine(tmp_config, client)
@@ -189,3 +193,52 @@ def test_run_once_passes_audio_into_engine(tmp_config, tmp_path, monkeypatch):
     assert app.engine.received["audio_duration_seconds"] == 5.0
     # Temp audio is cleaned up after the turn.
     assert not wav.exists()
+
+
+class _StreamingStubEngine:
+    def __init__(self, speaker_called: threading.Event):
+        self.speaker_called = speaker_called
+
+    def generate_reply(self, user_text, transient_context=None, audio_path=None,
+                       audio_mime_type="audio/wav", audio_duration_seconds=0.0,
+                       on_status=None):
+        del transient_context, audio_path, audio_mime_type, audio_duration_seconds, on_status
+        assert user_text == "stream this"
+        yield "First paragraph."
+        yield "\n\n"
+        assert self.speaker_called.wait(1.0)
+        yield "Second paragraph."
+
+
+def test_run_once_starts_tts_after_first_streamed_paragraph(tmp_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("THERAPIST_SAFETY_ENABLED", "0")
+    from src.main import TherapistApp
+
+    app = TherapistApp.__new__(TherapistApp)
+    app.config = tmp_config
+    app.config.safety.enabled = False
+    app.transcript = []
+    app.session_id = "test"
+    app._partial_path = tmp_path / "p.jsonl"
+    app._lock = threading.Lock()
+    app._closed = False
+
+    speaker_called = threading.Event()
+    spoken = []
+    app.engine = _StreamingStubEngine(speaker_called)
+
+    class _NoNotes:
+        def per_turn(self, *a, **k):
+            raise RuntimeError("skip")
+    app.librarian = _NoNotes()
+
+    class _Speaker:
+        def speak_text(self, text):
+            spoken.append(text)
+            speaker_called.set()
+    app.speaker = _Speaker()
+
+    reply = app.run_once("stream this", speak=True, emit_console=False)
+
+    assert reply == "First paragraph.\n\nSecond paragraph."
+    assert spoken == ["First paragraph.", "Second paragraph."]

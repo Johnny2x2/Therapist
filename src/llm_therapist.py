@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -29,18 +29,36 @@ def _message_has_audio(message: Dict[str, Any]) -> bool:
     return bool(message.get(field_name))
 
 
+def _estimate_msg_tokens(role: str, content: str) -> int:
+    # Rough heuristic: ~4 characters per token, plus a small per-message
+    # overhead for role framing.
+    return (len(content) + len(role)) // 4 + 4
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Estimate the token cost of a bare string using the same heuristic."""
+    return len(text) // 4 + 4
+
+
 @dataclass
 class Message:
     role: str
     content: str
+    pinned: bool = False
+
+
+@dataclass
+class CompactionResult:
+    evicted: List["Message"]
+    summary: str
 
 
 @dataclass
 class ConversationState:
     messages: List[Message] = field(default_factory=list)
 
-    def append(self, role: str, content: str) -> None:
-        self.messages.append(Message(role=role, content=content))
+    def append(self, role: str, content: str, pinned: bool = False) -> None:
+        self.messages.append(Message(role=role, content=content, pinned=pinned))
 
     def as_payload(self) -> List[Dict[str, str]]:
         return [{"role": item.role, "content": item.content} for item in self.messages]
@@ -50,9 +68,67 @@ class ConversationState:
         # overhead for role framing. Good enough for a usage gauge.
         total = 0
         for item in self.messages:
-            total += (len(item.content) + len(item.role)) // 4 + 4
+            total += _estimate_msg_tokens(item.role, item.content)
         return total
 
+    def estimate_tail_tokens(self) -> int:
+        """Estimated tokens of the non-pinned (evictable) tail only."""
+        total = 0
+        for item in self.messages:
+            if item.pinned:
+                continue
+            total += _estimate_msg_tokens(item.role, item.content)
+        return total
+
+    def split_tail_for_eviction(
+        self, keep_tokens: int
+    ) -> Tuple[List[Message], List[Message]]:
+        """Group the non-pinned tail into consecutive (user, assistant) pairs and
+        keep the most recent pairs that fit under ``keep_tokens``.
+
+        Returns ``(evicted, kept)`` where ``evicted`` are the oldest messages to
+        roll into the summary and ``kept`` are the most recent messages to retain.
+        The most recent pair is always kept even if it exceeds the budget.
+        """
+        tail = [m for m in self.messages if not m.pinned]
+        if not tail:
+            return [], []
+
+        # Build pairs from the tail in order. A pair is one or more leading
+        # messages followed by messages up to (and including) the next assistant.
+        pairs: List[List[Message]] = []
+        current: List[Message] = []
+        for msg in tail:
+            current.append(msg)
+            if msg.role == "assistant":
+                pairs.append(current)
+                current = []
+        if current:
+            pairs.append(current)
+
+        # Walk newest -> oldest, keeping pairs while under budget.
+        kept_rev: List[List[Message]] = []
+        used = 0
+        for pair in reversed(pairs):
+            cost = sum(_estimate_msg_tokens(m.role, m.content) for m in pair)
+            if kept_rev and used + cost > keep_tokens:
+                break
+            kept_rev.append(pair)
+            used += cost
+        kept_pairs = list(reversed(kept_rev))
+        kept_count = len(kept_pairs)
+        evicted_pairs = pairs[: len(pairs) - kept_count]
+
+        evicted = [m for pair in evicted_pairs for m in pair]
+        kept = [m for pair in kept_pairs for m in pair]
+        return evicted, kept
+
+    def apply_compaction(
+        self, kept_tail: List[Message], summary_message: Message
+    ) -> None:
+        """Rebuild the message list as pinned-head + single summary + kept tail."""
+        head = [m for m in self.messages if m.pinned and m is not summary_message]
+        self.messages = head + [summary_message] + list(kept_tail)
 
 
 @dataclass
@@ -264,13 +340,15 @@ class TherapistEngine:
         self.config = config
         self.client = client or OllamaClient(config)
         self.state = ConversationState(
-            messages=[Message(role="system", content=config.prompts["therapist"])]
+            messages=[Message(role="system", content=config.prompts["therapist"], pinned=True)]
         )
+        self._summary_message: Optional[Message] = None
+        self._rolling_summary: str = ""
 
     def add_memory_context(self, snippets: Iterable[str]) -> None:
         content = "\n".join(item for item in snippets if item)
         if content:
-            self.state.append("system", "Relevant past session context:\n" + content)
+            self.state.append("system", "Relevant past session context:\n" + content, pinned=True)
 
     def add_pinned_notes(self, snippets: Iterable[str]) -> None:
         content = "\n\n---\n\n".join(item for item in snippets if item)
@@ -278,7 +356,67 @@ class TherapistEngine:
             self.state.append(
                 "system",
                 "The user's pinned reference notes (always relevant):\n" + content,
+                pinned=True,
             )
+
+    # ------------------------------------------------------------ compaction
+    def _format_summary(self, text: str) -> str:
+        return (
+            "Running summary of earlier conversation (older turns were condensed "
+            "to save context):\n" + text
+        )
+
+    def _ensure_summary_message(self, text: str) -> Message:
+        self._rolling_summary = text
+        content = self._format_summary(text)
+        if self._summary_message is None:
+            self._summary_message = Message(role="system", content=content, pinned=True)
+        else:
+            self._summary_message.content = content
+            self._summary_message.pinned = True
+        return self._summary_message
+
+    def _summarize_rolling(self, prior: str, evicted: List[Message]) -> str:
+        exchanges = "\n".join(f"{m.role}: {m.content}" for m in evicted)
+        user_block = (
+            "PREVIOUS SUMMARY:\n" + (prior or "(none)") + "\n\n"
+            "NEW EXCHANGES:\n" + exchanges
+        )
+        messages = [
+            {"role": "system", "content": self.config.prompts["context_summary"]},
+            {"role": "user", "content": user_block},
+        ]
+        fragments: List[str] = []
+        for token in self.client.stream_chat(
+            messages, model=self.config.models.therapist_model
+        ):
+            fragments.append(token)
+        return "".join(fragments).strip()
+
+    def compact_context(self, projected_extra_tokens: int = 0) -> Optional[CompactionResult]:
+        """Condense the oldest user/assistant pairs into a running summary when
+        the live tail exceeds the configured budget. Returns the result, or None
+        when no compaction was needed or possible."""
+        ctx = self.config.context
+        if not ctx.enabled:
+            return None
+        budget = int(self.config.num_ctx * ctx.budget_ratio)
+        if budget <= 0:
+            return None
+        trigger = int(budget * ctx.trigger_ratio)
+        keep = int(budget * ctx.keep_ratio)
+        projected = self.state.estimate_tail_tokens() + max(0, projected_extra_tokens)
+        if projected < trigger:
+            return None
+        evicted, kept = self.state.split_tail_for_eviction(keep)
+        if not evicted:
+            return None
+        summary = self._summarize_rolling(self._rolling_summary, evicted)
+        if not summary:
+            return None
+        summary_message = self._ensure_summary_message(summary)
+        self.state.apply_compaction(kept, summary_message)
+        return CompactionResult(evicted=evicted, summary=summary)
 
     def generate_reply(
         self,
@@ -343,3 +481,4 @@ class TherapistEngine:
         reply = "".join(fragments).strip()
         if reply:
             self.state.append("assistant", reply)
+

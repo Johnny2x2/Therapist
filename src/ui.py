@@ -104,8 +104,11 @@ class DesktopUI:
         self.speak_check = ttk.Checkbutton(controls, text="Speak replies", variable=self.speak_var)
         self.speak_check.grid(row=0, column=3, sticky="e")
 
+        self.stop_voice_button = ttk.Button(controls, text="Stop Voice", command=self._stop_voice)
+        self.stop_voice_button.grid(row=0, column=4, padx=(8, 0))
+
         self.end_button = ttk.Button(controls, text="End Session", command=self._end_session)
-        self.end_button.grid(row=0, column=4, padx=(8, 0))
+        self.end_button.grid(row=0, column=5, padx=(8, 0))
 
         transcript_wrap = ttk.Frame(container, style="App.TFrame")
         transcript_wrap.grid(row=2, column=0, sticky="nsew")
@@ -151,6 +154,7 @@ class DesktopUI:
         self.status_label = ttk.Label(footer, textvariable=self.status_var, style="Body.TLabel")
         self.status_label.grid(row=0, column=0, sticky="w")
 
+        style = ttk.Style()
         style.configure("Record.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#3f7d5a")
         style.configure("RecordWarn.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#c47f24")
         style.configure("RecordLow.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#b23b3b")
@@ -293,6 +297,10 @@ class DesktopUI:
         self.stop_button.configure(state=tk.DISABLED)
         self._stop_record_countdown()
         self.status_var.set("Finishing recording...")
+
+    def _stop_voice(self) -> None:
+        self.app.speaker.stop()
+        self.status_var.set("Voice stopped.")
 
     # ------------------------------------------------------- record timer
     def _start_record_countdown(self) -> None:
