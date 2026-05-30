@@ -1,0 +1,9 @@
+[project]
+name = "therapist-engine"
+version = "0.1.0"
+description = "Local voice therapist engine using Ollama and open-source speech models."
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

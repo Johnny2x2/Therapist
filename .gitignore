@@ -1,0 +1,5 @@
+.data/*
+*.partial.jsonl
+.venv/*
+src/__pycache__/*
+tests/__pycache__/*

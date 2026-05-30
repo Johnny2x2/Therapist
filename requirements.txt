@@ -1,0 +1,9 @@
+numpy
+sounddevice
+faster-whisper
+silero-vad
+supertonic
+chromadb
+ollama
+pydub
+requests

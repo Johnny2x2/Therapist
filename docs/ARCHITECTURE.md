@@ -1,0 +1,179 @@
+# Architecture
+
+This document explains how Therapist Engine works internally today.
+
+## High-Level Design
+
+The application is split into several focused modules:
+
+- `src/config.py`: configuration, paths, model names, prompt loading
+- `src/llm_therapist.py`: low-level Ollama API client and therapist conversation state
+- `src/safety.py`: separate safety classification and crisis-response construction
+- `src/memory.py`: summarization, embeddings, and Chroma-based retrieval
+- `src/stt_listener.py`: microphone capture and whisper transcription
+- `src/tts_speaker.py`: XTTS speech synthesis and playback
+- `src/main.py`: application orchestration for CLI and shared turn handling
+- `src/ui.py`: Tkinter desktop UI and background worker wiring
+
+## Core Request Flow
+
+For a normal text turn, the application follows this path:
+
+1. A user message enters through the CLI or desktop UI.
+2. `TherapistApp._handle_turn()` appends the message to the in-memory transcript.
+3. `SafetyMonitor.assess()` sends the raw user message to the safety model.
+4. If the safety model flags the message, `SafetyMonitor.build_crisis_reply()` generates a crisis-aware therapist reply.
+5. If the message is not flagged, `TherapistEngine.generate_reply()` streams a normal therapist reply from the main model.
+6. The reply is appended to transcript state and optionally spoken.
+7. On shutdown, `MemoryStore.summarize()` creates a session summary and `MemoryStore.remember_session()` stores both the summary and its embedding.
+
+## Ollama Integration
+
+`OllamaClient` talks to the local Ollama HTTP API directly with `urllib.request`.
+
+Two endpoints are used:
+
+- `/api/chat` for streaming model responses
+- `/api/embed` for embedding vectors
+
+The client sends:
+
+- the model name
+- the message list
+- the `keep_alive` setting from config
+
+Streaming behavior:
+
+- Each JSON line from Ollama is parsed incrementally.
+- The `message.content` fragment is yielded token by token.
+- The UI consumes those fragments and appends them live to the transcript.
+
+## Conversation State
+
+`ConversationState` stores the therapist conversation as a list of role/content messages.
+
+Important detail:
+
+- The therapist system prompt is inserted at startup.
+- Retrieved memory snippets are added back as extra `system` messages.
+- User and assistant turns accumulate over the lifetime of the app session.
+
+This means the active conversation history is preserved in memory until the session exits.
+
+## Safety Layer
+
+The safety layer is intentionally separated from the main therapist generation path.
+
+Current behavior:
+
+- Every user message is sent to the safety model first.
+- The safety prompt asks for JSON output with `flagged`, `risk_level`, and `reason`.
+- If JSON parsing fails, the app falls back to `flagged=False` with `risk_level="unknown"`.
+- If `flagged=True`, the normal therapist reply path is bypassed and the app generates a crisis-oriented response instead.
+
+This gives the project a distinct safety pass rather than relying only on the therapist model prompt.
+
+## Memory Layer
+
+The memory system is session-summary based, not full transcript retrieval.
+
+How it works:
+
+1. At startup, the app can query Chroma using a seed phrase.
+2. Retrieved summaries are inserted into the therapist context as relevant past session context.
+3. At shutdown, the current transcript is summarized by the therapist model.
+4. The summary is embedded through `nomic-embed-text`.
+5. The summary and embedding are stored in Chroma.
+
+What this means in practice:
+
+- The app tries to carry forward themes between sessions.
+- It does not currently reload full transcripts.
+- Memory quality depends on the quality of the generated summary.
+
+## Desktop UI Design
+
+The UI uses Tkinter and a worker-thread event queue.
+
+Why this matters:
+
+- Ollama generation is blocking network I/O.
+- STT and TTS can also block.
+- Tkinter must stay on the main thread to remain responsive.
+
+Current UI strategy:
+
+- UI actions start a background worker thread.
+- The worker thread calls `TherapistApp.run_once()`.
+- Token/status events are pushed into a `queue.Queue`.
+- The Tk main loop polls the queue every 60 ms.
+- The transcript widget is updated on the main thread only.
+
+This is why the UI can stream replies while remaining interactive.
+
+## Speech Pipeline
+
+### Speech-to-text
+
+`SpeechListener` loads:
+
+- `sounddevice` for audio capture
+- `faster_whisper.WhisperModel` for transcription
+- `silero_vad` for future VAD integration
+
+Current behavior:
+
+- Captures input audio to a temporary WAV file
+- Runs `faster-whisper` transcription with `vad_filter=True`
+- Returns a `TranscriptChunk` containing text and the temp file path
+
+Current gap:
+
+- The code loads Silero VAD but does not yet use it to stop recording dynamically.
+
+### Text-to-speech
+
+`TextSpeaker` loads XTTS through `TTS.api.TTS`.
+
+Current behavior:
+
+- Splits the final response into sentences
+- Synthesizes each sentence to a temporary WAV file
+- Plays each WAV through `sounddevice`
+
+Current gap:
+
+- The architecture plan called for streaming, queued playback, and barge-in. The current code speaks sentence by sentence, but it is not yet cancellable mid-playback.
+
+## Startup and Shutdown
+
+### Startup
+
+When the app starts:
+
+1. `AppConfig.load()` creates data directories and loads prompt files.
+2. `TherapistApp` constructs the Ollama client, memory store, therapist engine, safety monitor, listener, and speaker.
+3. `warm_memory()` optionally seeds the conversation with retrieved past summaries.
+
+### Shutdown
+
+When the app exits normally:
+
+1. The transcript is summarized.
+2. The summary is embedded.
+3. The result is saved to `.data/sessions/` and `.data/chroma/`.
+
+## Setup Script
+
+`scripts/setup.ps1` is intended to bootstrap the heavier runtime.
+
+It currently:
+
+- verifies that Ollama exists
+- verifies that the chosen Python is at least 3.10
+- creates a virtual environment
+- installs CUDA PyTorch wheels
+- installs Python dependencies from `requirements.txt`
+- pulls the three required Ollama models
+
+This script is the intended path for enabling the full voice stack.

@@ -1,0 +1,28 @@
+# Newline-delimited regex patterns. Case-insensitive. Lines starting with # are ignored.
+# A match escalates the message to flagged=True even if the classifier returns clean.
+
+# Suicide / self-harm intent
+\bkill\s+myself\b
+\bkilling\s+myself\b
+\bend\s+my\s+life\b
+\bend\s+it\s+all\b
+\btake\s+my\s+(own\s+)?life\b
+\bsuicid(e|al)\b
+\bwant\s+to\s+die\b
+\bwish\s+i\s+(was|were)\s+dead\b
+\bdon'?t\s+want\s+to\s+(live|be\s+alive|be\s+here)\b
+\bno\s+reason\s+to\s+live\b
+\bhang\s+myself\b
+\boverdose\b
+\bself[-\s]?harm\b
+\bcut(ting)?\s+myself\b
+\bhurt(ing)?\s+myself\b
+
+# Plan / means
+\bgoodbye\s+(letter|note)\b
+\bsuicide\s+note\b
+\bloaded\s+(gun|firearm|pistol)\b
+
+# Violence toward others
+\bkill\s+(him|her|them|someone)\b
+\bhurt\s+(him|her|them|someone)\b
