@@ -34,20 +34,24 @@ class AudioSettings:
     sample_rate: int = 16000
     channels: int = 1
     silence_ms: int = field(default_factory=lambda: int(os.getenv("THERAPIST_SILENCE_MS", "3000")))
-    max_record_seconds: int = field(default_factory=lambda: int(os.getenv("THERAPIST_MAX_RECORD_S", "60")))
+    max_record_seconds: int = field(default_factory=lambda: int(os.getenv("THERAPIST_MAX_RECORD_S", "30")))
     device_index: int = None
     voice_name: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_VOICE", "F5"))
     tts_language: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_LANG", "en"))
     tts_steps: int = field(default_factory=lambda: int(os.getenv("THERAPIST_TTS_STEPS", "16")))
     tts_speed: float = field(default_factory=lambda: float(os.getenv("THERAPIST_TTS_SPEED", "1.15")))
+    # Multimodal voice turns: attach the captured WAV to the therapist model.
+    send_audio_to_model: bool = field(default_factory=lambda: os.getenv("THERAPIST_SEND_AUDIO_TO_MODEL", "1") != "0")
+    model_audio_max_seconds: float = field(default_factory=lambda: float(os.getenv("THERAPIST_MODEL_AUDIO_MAX_S", "30")))
+    audio_fallback_text: bool = field(default_factory=lambda: os.getenv("THERAPIST_AUDIO_FALLBACK_TEXT", "1") != "0")
 
 
 @dataclass
 class ModelSettings:
-    therapist_model: str = "Gemma-4-Uncensored-HauhauCS-Aggressive"
-    safety_model: str = "Gemma-4-Uncensored-HauhauCS-Aggressive"
+    therapist_model: str = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"
+    safety_model: str = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"
     embedding_model: str = "nomic-embed-text:latest"
-    librarian_model: str = field(default_factory=lambda: os.getenv("THERAPIST_LIBRARIAN_MODEL", "Gemma-4-Uncensored-HauhauCS-Aggressive"))
+    librarian_model: str = field(default_factory=lambda: os.getenv("THERAPIST_LIBRARIAN_MODEL", "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:latest"))
     whisper_model: str = "distil-large-v3"
     tts_model: str = "Supertone/supertonic-3"
 
@@ -122,7 +126,7 @@ class AppConfig:
             directory.mkdir(parents=True, exist_ok=True)
         config.prompts = {
             "therapist": _read_prompt(
-                PROMPTS_DIR / "therapist_system.txt",
+                PROMPTS_DIR / "DrRebecca.txt",
                 "You are a calm, empathic therapist assistant. Reflect feelings, ask open questions, avoid diagnosis, and do not claim to replace emergency or professional care.",
             ),
             "safety": _read_prompt(

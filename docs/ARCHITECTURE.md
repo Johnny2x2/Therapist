@@ -125,11 +125,31 @@ Current behavior:
 
 - Captures input audio to a temporary WAV file
 - Runs `faster-whisper` transcription with `vad_filter=True`
-- Returns a `TranscriptChunk` containing text and the temp file path
+- Returns a `TranscriptChunk` containing text, the temp file path, the MIME type, and the clip duration
 
 Current gap:
 
 - The code loads Silero VAD but does not yet use it to stop recording dynamically.
+
+### Multimodal voice turns
+
+When a voice turn is sent to the therapist model, the app can attach the captured
+WAV alongside the Whisper transcript:
+
+- The transcript remains the canonical text used for safety classification, keyword
+  pre-screening, librarian retrieval, memory summaries, transcript persistence, and
+  the UI display.
+- `TherapistEngine.generate_reply()` attaches the base64-encoded WAV to the latest
+  user message only. `ConversationState` stays text-only, so prior turns never retain
+  audio blobs or temp file paths.
+- `OllamaClient.attach_audio()` isolates the Ollama media field (`THERAPIST_OLLAMA_AUDIO_FIELD`,
+  default `images`) so it can be retargeted without touching the rest of the payload. Ollama
+  0.24+ unifies audio and images into the `images` field and routes a WAV to the audio encoder
+  by sniffing the decoded bytes.
+- If the model or endpoint rejects audio, `stream_chat` raises `UnsupportedAudioError`
+  and the engine retries the same turn transcript-only (when `THERAPIST_AUDIO_FALLBACK_TEXT`
+  is enabled). Clips longer than `THERAPIST_MODEL_AUDIO_MAX_S` are sent transcript-only.
+- The temporary WAV is deleted after the turn completes.
 
 ### Text-to-speech
 

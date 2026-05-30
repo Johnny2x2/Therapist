@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from urllib import request
+from urllib.error import HTTPError, URLError
 
 from .config import AppConfig
+
+
+class UnsupportedAudioError(RuntimeError):
+    """Raised when the model/endpoint rejects an attached audio payload."""
+
+
+def _audio_field_name() -> str:
+    # Ollama 0.24+ unifies media into the `images` field and routes by sniffing
+    # the decoded bytes (WAV -> audio encoder, PNG/JPEG -> vision encoder). The
+    # field is isolated here so it can be retargeted without touching the rest
+    # of the payload-building code.
+    return os.getenv("THERAPIST_OLLAMA_AUDIO_FIELD", "images")
+
+
+def _message_has_audio(message: Dict[str, Any]) -> bool:
+    field_name = _audio_field_name()
+    return bool(message.get(field_name))
 
 
 @dataclass
@@ -50,29 +71,60 @@ class OllamaClient:
     def __init__(self, config: AppConfig):
         self.config = config
 
+    # ------------------------------------------------------------ audio
+    @staticmethod
+    def attach_audio(
+        message: Dict[str, Any],
+        audio_path: str,
+        mime_type: str = "audio/wav",
+    ) -> Dict[str, Any]:
+        """Return a copy of ``message`` with a base64-encoded audio clip attached.
+
+        The original text content is preserved so the model still receives the
+        Whisper transcript alongside the raw audio.
+        """
+        del mime_type  # Ollama infers type from the decoded bytes.
+        data = Path(audio_path).read_bytes()
+        encoded = base64.b64encode(data).decode("ascii")
+        enriched = dict(message)
+        enriched[_audio_field_name()] = [encoded]
+        return enriched
+
     # ------------------------------------------------------------ chat (stream)
     def stream_chat(
         self,
-        messages: Iterable[Dict[str, str]],
+        messages: Iterable[Dict[str, Any]],
         model: Optional[str] = None,
         fmt: Optional[str] = None,
     ) -> Iterator[str]:
+        messages = list(messages)
+        has_audio = any(_message_has_audio(item) for item in messages)
         body: Dict[str, Any] = {
             "model": model or self.config.models.therapist_model,
             "stream": True,
             "keep_alive": self.config.keep_alive,
-            "messages": list(messages),
+            "messages": messages,
             "options": {"num_ctx": self.config.num_ctx},
         }
         if fmt:
             body["format"] = fmt
         req = self._post("/api/chat", body)
-        with request.urlopen(req) as response:
+        try:
+            response = request.urlopen(req)
+        except (HTTPError, URLError) as exc:
+            if has_audio:
+                raise UnsupportedAudioError(str(exc)) from exc
+            raise
+        with response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line:
                     continue
                 chunk = json.loads(line)
+                if chunk.get("error"):
+                    if has_audio:
+                        raise UnsupportedAudioError(str(chunk.get("error")))
+                    raise RuntimeError(str(chunk.get("error")))
                 message = chunk.get("message") or {}
                 content = message.get("content")
                 if content:
@@ -232,6 +284,10 @@ class TherapistEngine:
         self,
         user_text: str,
         transient_context: Optional[Iterable[str]] = None,
+        audio_path: Optional[str] = None,
+        audio_mime_type: str = "audio/wav",
+        audio_duration_seconds: float = 0.0,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[str]:
         self.state.append("user", user_text)
         payload = self.state.as_payload()
@@ -246,10 +302,44 @@ class TherapistEngine:
                     "content": "Possibly relevant notes for this turn:\n"
                                + "\n\n---\n\n".join(extras),
                 })
+
+        use_audio = bool(audio_path) and self.config.audio.send_audio_to_model
+        if use_audio:
+            max_s = self.config.audio.model_audio_max_seconds
+            if audio_duration_seconds and max_s and audio_duration_seconds > max_s:
+                # Clip exceeds the model's audio window; stay transcript-only.
+                use_audio = False
+                if on_status:
+                    on_status(
+                        f"Audio clip {audio_duration_seconds:.0f}s exceeds "
+                        f"{max_s:.0f}s limit; sending transcript only."
+                    )
+
+        audio_payload = payload
+        if use_audio:
+            audio_payload = list(payload)
+            # Attach the clip to the latest user turn only.
+            audio_payload[-1] = OllamaClient.attach_audio(
+                audio_payload[-1], audio_path, audio_mime_type,
+            )
+
         fragments: List[str] = []
-        for token in self.client.stream_chat(payload):
-            fragments.append(token)
-            yield token
+        try:
+            for token in self.client.stream_chat(audio_payload):
+                fragments.append(token)
+                yield token
+        except UnsupportedAudioError:
+            if not (use_audio and self.config.audio.audio_fallback_text):
+                raise
+            if fragments:
+                # Tokens already streamed; cannot cleanly restart this turn.
+                raise
+            if on_status:
+                on_status("Model rejected audio; retrying with transcript only.")
+            for token in self.client.stream_chat(payload):
+                fragments.append(token)
+                yield token
+
         reply = "".join(fragments).strip()
         if reply:
             self.state.append("assistant", reply)

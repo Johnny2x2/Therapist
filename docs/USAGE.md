@@ -92,8 +92,8 @@ Key values:
 - Ollama keep-alive: `5m`
 - Audio sample rate: `16000`
 - Audio channels: `1`
-- Max recording length: `30` seconds
-- Default speaker reference WAV: `speaker_reference.wav`
+- Max recording length: `30` seconds (`THERAPIST_MAX_RECORD_S`)
+- Send audio to therapist model: enabled (`THERAPIST_SEND_AUDIO_TO_MODEL`)
 
 The prompt files live under `prompts/`:
 
@@ -124,10 +124,21 @@ It stores:
 ### Voice path
 
 1. Launch GUI mode and click `Listen Once`, or run `--mode voice`.
-2. The app captures microphone audio.
+2. The app captures microphone audio (up to 30 seconds by default).
 3. Whisper transcribes the audio.
-4. The transcript is passed into the same safety and therapist flow.
-5. If enabled and available, the reply is spoken with XTTS.
+4. The transcript is passed into the same safety and memory flow (always text-only).
+5. For the therapist reply, the captured WAV is also attached to the audio-capable
+   model alongside the transcript, when enabled. If the model or Ollama endpoint
+   rejects audio, the app automatically retries with transcript only.
+6. If enabled and available, the reply is spoken with TTS.
+
+Multimodal voice settings (environment variables):
+
+- `THERAPIST_SEND_AUDIO_TO_MODEL` (default `1`): attach the captured WAV to the therapist model.
+- `THERAPIST_MODEL_AUDIO_MAX_S` (default `30`): clips longer than this stay transcript-only.
+- `THERAPIST_AUDIO_FALLBACK_TEXT` (default `1`): retry transcript-only if audio is rejected.
+- `THERAPIST_MAX_RECORD_S` (default `30`): maximum microphone capture length.
+- `THERAPIST_OLLAMA_AUDIO_FIELD` (default `images`): the Ollama message field used to carry audio. Ollama 0.24+ unifies media into the `images` field and routes a WAV to the audio encoder by sniffing the bytes.
 
 ## Known Limitations
 

@@ -5,7 +5,7 @@ import tempfile
 import threading
 import wave
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -16,6 +16,8 @@ from .config import AppConfig
 class TranscriptChunk:
     text: str
     audio_path: str
+    mime_type: str = "audio/wav"
+    duration_seconds: float = 0.0
 
 
 class SpeechListener:
@@ -48,7 +50,11 @@ class SpeechListener:
         if self._vad_model is None:
             self._vad_model = load_silero_vad()
 
-    def capture_once(self, stop_event: Optional[threading.Event] = None) -> TranscriptChunk:
+    def capture_once(
+        self,
+        stop_event: Optional[threading.Event] = None,
+        on_ready: Optional["Callable[[], None]"] = None,
+    ) -> TranscriptChunk:
         self._load_dependencies()
         print("Speak now. Recording will stop after a short pause.")
         frames = []
@@ -68,6 +74,8 @@ class SpeechListener:
             dtype="float32",
             callback=callback,
         ):
+            if on_ready is not None:
+                on_ready()  # Mic is live; safe to tell the user to start talking.
             start_time = time.time()
             is_speaking = False
             silence_start = None
@@ -96,6 +104,7 @@ class SpeechListener:
             return TranscriptChunk(text="", audio_path="")
 
         audio = np.concatenate(frames, axis=0).flatten()
+        duration_seconds = float(len(audio)) / float(self.config.audio.sample_rate or 1)
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         with wave.open(temp_file.name, "wb") as wav_file:
             wav_file.setnchannels(self.config.audio.channels)
@@ -110,4 +119,9 @@ class SpeechListener:
             beam_size=1,
         )
         text = " ".join(segment.text.strip() for segment in segments).strip()
-        return TranscriptChunk(text=text, audio_path=temp_file.name)
+        return TranscriptChunk(
+            text=text,
+            audio_path=temp_file.name,
+            mime_type="audio/wav",
+            duration_seconds=duration_seconds,
+        )

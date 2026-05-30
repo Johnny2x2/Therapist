@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 import traceback
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -31,6 +32,9 @@ class DesktopUI:
         self.speak_var = tk.BooleanVar(value=False)
         self.category_var = tk.StringVar(value="(all)")
         self.context_var = tk.StringVar(value="")
+        self.record_var = tk.StringVar(value="")
+        self._record_deadline: Optional[float] = None
+        self._record_timer_id: Optional[str] = None
 
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -144,7 +148,19 @@ class DesktopUI:
         footer = ttk.Frame(container, style="App.TFrame", padding=(0, 10, 0, 0))
         footer.grid(row=4, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
-        ttk.Label(footer, textvariable=self.status_var, style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        self.status_label = ttk.Label(footer, textvariable=self.status_var, style="Body.TLabel")
+        self.status_label.grid(row=0, column=0, sticky="w")
+
+        style.configure("Record.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#3f7d5a")
+        style.configure("RecordWarn.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#c47f24")
+        style.configure("RecordLow.Horizontal.TProgressbar", troughcolor="#d6dccf", background="#b23b3b")
+        self.record_bar = ttk.Progressbar(
+            footer, orient="horizontal", mode="determinate",
+            length=160, maximum=float(self.app.config.audio.max_record_seconds or 1),
+            style="Record.Horizontal.TProgressbar",
+        )
+        self.record_label = ttk.Label(footer, textvariable=self.record_var, style="Body.TLabel")
+        # Recording indicator widgets stay hidden until a capture starts.
 
         context_row = ttk.Frame(container, style="App.TFrame", padding=(0, 6, 0, 0))
         context_row.grid(row=5, column=0, sticky="ew")
@@ -268,14 +284,63 @@ class DesktopUI:
         self._set_busy(True)
         self._stop_recording.clear()
         self.stop_button.configure(state=tk.NORMAL)
-        self.status_var.set("Listening... click 'Done Speaking' when finished.")
-        self._append_line("System", "Listening once from microphone...", "meta")
+        self.status_var.set("Preparing microphone (loading speech model)...")
+        self._append_line("System", "Loading speech model...", "meta")
         self._run_worker(target=self._process_voice_turn, args=(self.speak_var.get(),))
 
     def _stop_listening(self) -> None:
         self._stop_recording.set()
         self.stop_button.configure(state=tk.DISABLED)
+        self._stop_record_countdown()
         self.status_var.set("Finishing recording...")
+
+    # ------------------------------------------------------- record timer
+    def _start_record_countdown(self) -> None:
+        limit = float(self.app.config.audio.max_record_seconds or 0)
+        if limit <= 0:
+            return
+        self._record_deadline = time.monotonic() + limit
+        self.record_bar.configure(maximum=limit)
+        self.record_bar.grid(row=0, column=1, sticky="e", padx=(8, 6))
+        self.record_label.grid(row=0, column=2, sticky="e")
+        self._tick_record_countdown()
+
+    def _tick_record_countdown(self) -> None:
+        if self._record_deadline is None:
+            return
+        remaining = self._record_deadline - time.monotonic()
+        if remaining <= 0:
+            self.record_var.set("Time's up")
+            self.record_label.configure(foreground="#b23b3b")
+            self.record_bar.configure(value=self.record_bar["maximum"])
+            self._record_timer_id = None
+            return
+        limit = float(self.record_bar["maximum"]) or 1.0
+        self.record_bar.configure(value=limit - remaining)
+        self.record_var.set(f"{remaining:0.0f}s left")
+        if remaining <= 5:
+            color = "#b23b3b"  # running out
+            self.record_bar.configure(style="RecordLow.Horizontal.TProgressbar")
+        elif remaining <= 10:
+            color = "#c47f24"  # getting close
+            self.record_bar.configure(style="RecordWarn.Horizontal.TProgressbar")
+        else:
+            color = "#32463a"
+            self.record_bar.configure(style="Record.Horizontal.TProgressbar")
+        self.record_label.configure(foreground=color)
+        self._record_timer_id = self.root.after(200, self._tick_record_countdown)
+
+    def _stop_record_countdown(self) -> None:
+        if self._record_timer_id is not None:
+            try:
+                self.root.after_cancel(self._record_timer_id)
+            except Exception:
+                pass
+            self._record_timer_id = None
+        self._record_deadline = None
+        self.record_var.set("")
+        self.record_bar.grid_remove()
+        self.record_label.grid_remove()
 
     def _process_text_turn(self, user_text: str, speak: bool) -> None:
         try:
@@ -291,7 +356,10 @@ class DesktopUI:
 
     def _process_voice_turn(self, speak: bool) -> None:
         try:
-            chunk = self.app.listener.capture_once(stop_event=self._stop_recording)
+            chunk = self.app.listener.capture_once(
+                stop_event=self._stop_recording,
+                on_ready=lambda: self.events.put({"type": "recording_started"}),
+            )
             self.events.put({"type": "recording_done"})
             if not chunk.text:
                 self.events.put({"type": "meta", "text": "No speech detected."})
@@ -303,6 +371,9 @@ class DesktopUI:
                 on_token=self._queue_token,
                 on_status=self._queue_status,
                 emit_console=False,
+                audio_path=chunk.audio_path or None,
+                audio_mime_type=chunk.mime_type,
+                audio_duration_seconds=chunk.duration_seconds,
             )
             self.events.put({"type": "done"})
         except Exception as exc:
@@ -335,8 +406,13 @@ class DesktopUI:
                 self._append_line("System", event["text"], "meta")
             elif kind == "warn":
                 self._append_line("System", event["text"], "warn")
+            elif kind == "recording_started":
+                self.status_var.set("Listening \u2014 speak now! Click 'Done Speaking' when finished.")
+                self._append_line("System", "Microphone ready \u2014 go ahead.", "meta")
+                self._start_record_countdown()
             elif kind == "recording_done":
                 self.stop_button.configure(state=tk.DISABLED)
+                self._stop_record_countdown()
             elif kind == "done":
                 self._finish_reply()
                 self._set_busy(False)
@@ -346,6 +422,7 @@ class DesktopUI:
             elif kind == "error":
                 self._finish_reply()
                 self._set_busy(False)
+                self._stop_record_countdown()
                 self.status_var.set("Error.")
                 messagebox.showerror("Therapist Engine", event["message"])
             elif kind == "session_ended":

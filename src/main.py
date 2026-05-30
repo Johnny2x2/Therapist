@@ -87,7 +87,13 @@ class TherapistApp:
                 chunk = self.listener.capture_once()
                 if not chunk.text:
                     continue
-                self._handle_turn(chunk.text, speak=True)
+                self._handle_turn(
+                    chunk.text,
+                    speak=True,
+                    audio_path=chunk.audio_path or None,
+                    audio_mime_type=chunk.mime_type,
+                    audio_duration_seconds=chunk.duration_seconds,
+                )
         finally:
             self.end_session()
 
@@ -98,6 +104,9 @@ class TherapistApp:
         on_token: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         emit_console: bool = True,
+        audio_path: Optional[str] = None,
+        audio_mime_type: str = "audio/wav",
+        audio_duration_seconds: float = 0.0,
     ) -> str:
         return self._handle_turn(
             user_text,
@@ -105,6 +114,9 @@ class TherapistApp:
             on_token=on_token,
             on_status=on_status,
             emit_console=emit_console,
+            audio_path=audio_path,
+            audio_mime_type=audio_mime_type,
+            audio_duration_seconds=audio_duration_seconds,
         )
 
     # ------------------------------------------------------------------ turn
@@ -115,6 +127,9 @@ class TherapistApp:
         on_token: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         emit_console: bool = True,
+        audio_path: Optional[str] = None,
+        audio_mime_type: str = "audio/wav",
+        audio_duration_seconds: float = 0.0,
     ) -> str:
         user_record = TurnRecord(
             role="user",
@@ -145,6 +160,7 @@ class TherapistApp:
             if on_status:
                 on_status(f"Crisis response ready ({safety_result.risk_level}).")
             self._emit_reply(reply, speak)
+            self._cleanup_turn_audio(audio_path)
             return reply
 
         # Mid-session per-turn retrieval (best-effort).
@@ -164,12 +180,22 @@ class TherapistApp:
         if on_status:
             on_status("Generating response...")
         tokens: List[str] = []
-        for token in self.engine.generate_reply(user_text, transient_context=transient):
-            if emit_console:
-                print(token, end="", flush=True)
-            if on_token:
-                on_token(token)
-            tokens.append(token)
+        try:
+            for token in self.engine.generate_reply(
+                user_text,
+                transient_context=transient,
+                audio_path=audio_path,
+                audio_mime_type=audio_mime_type,
+                audio_duration_seconds=audio_duration_seconds,
+                on_status=on_status,
+            ):
+                if emit_console:
+                    print(token, end="", flush=True)
+                if on_token:
+                    on_token(token)
+                tokens.append(token)
+        finally:
+            self._cleanup_turn_audio(audio_path)
         if emit_console:
             print()
         reply = "".join(tokens)
@@ -179,6 +205,17 @@ class TherapistApp:
         if on_status:
             on_status("Ready.")
         return reply
+
+    def _cleanup_turn_audio(self, audio_path: Optional[str]) -> None:
+        if not audio_path:
+            return
+        try:
+            p = Path(audio_path)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
 
     def _emit_reply(self, reply: str, speak: bool) -> None:
         self._append_turn(TurnRecord(role="assistant", content=reply, timestamp=_now_iso()))
