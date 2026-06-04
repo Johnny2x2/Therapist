@@ -3,3 +3,21 @@
 .venv/*
 src/__pycache__/*
 tests/__pycache__/*
+
+# Pytest
+.pytest_cache/
+
+# MyST
+.myst_nb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# General
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/

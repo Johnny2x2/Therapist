@@ -83,7 +83,7 @@ class DesktopUI:
         ttk.Label(header, text="Therapist Engine", style="Header.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
-            text="Local. Private. Not a substitute for professional or emergency care. "
+            text="Local. Private. Not a substitute for professional or emergency care. Use at your own risk."
                  "In immediate danger call 911 or 988.",
             style="Body.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
