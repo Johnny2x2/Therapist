@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import queue
 import tempfile
-import threading
 import wave
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -16,8 +15,6 @@ from .config import AppConfig
 class TranscriptChunk:
     text: str
     audio_path: str
-    mime_type: str = "audio/wav"
-    duration_seconds: float = 0.0
 
 
 class SpeechListener:
@@ -41,38 +38,16 @@ class SpeechListener:
         self.sounddevice = sounddevice_module
         if self._model is None:
             import os as _os
-
-            from .config import resolve_device
-
-            # Default to CPU: keeping Whisper off the GPU avoids VRAM contention
-            # with the LLM/TTS. Override with THERAPIST_WHISPER_DEVICE=cuda.
-            device = resolve_device(_os.getenv("THERAPIST_WHISPER_DEVICE", "cpu"))
-            on_gpu = device.startswith("cuda")
-            if on_gpu:
-                # Pin the cuDNN 9.10 stack ctranslate2 needs before it loads,
-                # avoiding "cudnnGetLibConfig. Error code 127".
-                from ._cuda_dll import preload_cuda_dlls
-
-                preload_cuda_dlls()
-            compute_type = _os.getenv(
-                "THERAPIST_WHISPER_COMPUTE", "float16" if on_gpu else "int8"
-            )
-            kwargs = {"device": "cuda" if on_gpu else device, "compute_type": compute_type}
-            if on_gpu:
-                # Honor an explicit "cuda:N", else fall back to THERAPIST_GPU_INDEX.
-                if ":" in device:
-                    kwargs["device_index"] = int(device.split(":", 1)[1])
-                else:
-                    kwargs["device_index"] = int(_os.getenv("THERAPIST_GPU_INDEX", "0"))
+            device = _os.getenv("THERAPIST_WHISPER_DEVICE", "cpu")
+            compute_type = _os.getenv("THERAPIST_WHISPER_COMPUTE", "float16" if device == "cuda" else "int8")
+            kwargs = {"device": device, "compute_type": compute_type}
+            if device == "cuda":
+                kwargs["device_index"] = int(_os.getenv("THERAPIST_WHISPER_GPU", "1"))
             self._model = WhisperModel(self.config.models.whisper_model, **kwargs)
         if self._vad_model is None:
             self._vad_model = load_silero_vad()
 
-    def capture_once(
-        self,
-        stop_event: Optional[threading.Event] = None,
-        on_ready: Optional["Callable[[], None]"] = None,
-    ) -> TranscriptChunk:
+    def capture_once(self) -> TranscriptChunk:
         self._load_dependencies()
         print("Speak now. Recording will stop after a short pause.")
         frames = []
@@ -92,15 +67,11 @@ class SpeechListener:
             dtype="float32",
             callback=callback,
         ):
-            if on_ready is not None:
-                on_ready()  # Mic is live; safe to tell the user to start talking.
             start_time = time.time()
             is_speaking = False
             silence_start = None
             
             while time.time() - start_time < self.config.audio.max_record_seconds:
-                if stop_event is not None and stop_event.is_set():
-                    break  # User pressed the stop button
                 self.sounddevice.sleep(100)
                 if not frames:
                     continue
@@ -118,11 +89,7 @@ class SpeechListener:
                     elif (time.time() - silence_start) * 1000 > self.config.audio.silence_ms:
                         break  # Stop recording after silence
 
-        if not frames:
-            return TranscriptChunk(text="", audio_path="")
-
         audio = np.concatenate(frames, axis=0).flatten()
-        duration_seconds = float(len(audio)) / float(self.config.audio.sample_rate or 1)
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         with wave.open(temp_file.name, "wb") as wav_file:
             wav_file.setnchannels(self.config.audio.channels)
@@ -137,9 +104,4 @@ class SpeechListener:
             beam_size=1,
         )
         text = " ".join(segment.text.strip() for segment in segments).strip()
-        return TranscriptChunk(
-            text=text,
-            audio_path=temp_file.name,
-            mime_type="audio/wav",
-            duration_seconds=duration_seconds,
-        )
+        return TranscriptChunk(text=text, audio_path=temp_file.name)

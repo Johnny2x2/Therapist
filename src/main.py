@@ -99,7 +99,6 @@ class TurnRecord:
     safety: Optional[Dict[str, Any]] = None
     surfaced_note_ids: List[str] = field(default_factory=list)
 
-
 class TherapistApp:
     def __init__(self, config: AppConfig):
         self.config = config

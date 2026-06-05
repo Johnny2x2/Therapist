@@ -3,10 +3,6 @@ sounddevice
 faster-whisper
 silero-vad
 supertonic
-# Optional alternative TTS backend (set THERAPIST_TTS_BACKEND=chatterbox).
-# Heavy: pulls in torch. Install only if you want Chatterbox voices:
-#   pip install chatterbox-tts
-# chatterbox-tts
 chromadb
 ollama
 pydub

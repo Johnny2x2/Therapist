@@ -614,7 +614,13 @@ class DesktopUI:
 
 def launch_desktop_ui(seed_memory: str = "feeling overwhelmed") -> None:
     config = AppConfig.load()
-    app = TherapistApp(config)
+    if getattr(config, 'backend_url', None):
+        from .api_client import RemoteTherapistApp
+        app = RemoteTherapistApp(config)
+    else:
+        from .main import TherapistApp
+        app = TherapistApp(config)
+    
     # Warm memory off the main thread so the window pops fast.
     threading.Thread(target=app.warm_memory, args=(seed_memory,), daemon=True).start()
     root = tk.Tk()
