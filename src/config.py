@@ -30,6 +30,15 @@ def _read_lines(path: Path) -> List[str]:
 
 
 @dataclass
+class ContextSettings:
+    enabled: bool = field(default_factory=lambda: os.getenv("THERAPIST_CONTEXT_COMPACTION", "1") != "0")
+    budget_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_BUDGET_RATIO", "0.5")))
+    trigger_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_TRIGGER_RATIO", "0.9")))
+    keep_ratio: float = field(default_factory=lambda: float(os.getenv("THERAPIST_CONTEXT_KEEP_RATIO", "0.5")))
+    persist_notebook: bool = field(default_factory=lambda: os.getenv("THERAPIST_CONTEXT_PERSIST_NOTEBOOK", "1") != "0")
+
+
+@dataclass
 class AudioSettings:
     sample_rate: int = 16000
     channels: int = 1
@@ -38,11 +47,14 @@ class AudioSettings:
     device_index: int = None
     voice_name: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_VOICE", "M1"))
     tts_language: str = field(default_factory=lambda: os.getenv("THERAPIST_TTS_LANG", "en"))
+    send_audio_to_model: bool = field(default_factory=lambda: os.getenv("THERAPIST_SEND_AUDIO_TO_MODEL", "1") != "0")
+    model_audio_max_seconds: float = field(default_factory=lambda: float(os.getenv("THERAPIST_MODEL_AUDIO_MAX_S", "30")))
+    audio_fallback_text: bool = field(default_factory=lambda: os.getenv("THERAPIST_AUDIO_FALLBACK_TEXT", "1") != "0")
 
 
 @dataclass
 class ModelSettings:
-    therapist_model: str = "wmb/llamasupport:latest"
+    therapist_model: str = "tripolskypetr/qwen3.5-uncensored-aggressive:9b"
     safety_model: str = "nemotron-mini:4b-instruct-q8_0"
     embedding_model: str = "nomic-embed-text:latest"
     librarian_model: str = field(default_factory=lambda: os.getenv("THERAPIST_LIBRARIAN_MODEL", "qwen3.5:9b"))
@@ -76,6 +88,7 @@ class MemorySettings:
 class AppConfig:
     profile: str = field(default_factory=lambda: os.getenv("THERAPIST_PROFILE", "default"))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
+    backend_url: str = field(default_factory=lambda: os.getenv("THERAPIST_BACKEND_URL", ""))
     data_dir: Path = field(default_factory=lambda: DATA_DIR)
     session_dir: Path = field(init=False)
     chroma_dir: Path = field(init=False)
@@ -90,6 +103,8 @@ class AppConfig:
     librarian: LibrarianSettings = field(default_factory=LibrarianSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    context: ContextSettings = field(default_factory=ContextSettings)
+    num_ctx: int = field(default_factory=lambda: int(os.getenv("THERAPIST_NUM_CTX", "16384")))
     prompts: Dict[str, str] = field(default_factory=dict)
     safety_keywords: List[str] = field(default_factory=list)
     notebook_categories: List[str] = field(default_factory=lambda: [

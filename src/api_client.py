@@ -92,20 +92,21 @@ class RemoteTherapistApp:
                     if on_token:
                         on_token(content)
                 elif mtype == "audio" and speak:
-                    # In a real app we'd decode base64 and play
-                    import base64
-                    import io
-                    import scipy.io.wavfile as wavfile
-                    # For now just decode and mock play to speaker
                     b64 = msg.get("data", "")
                     if b64:
                         import threading
-                        def _play():
+                        def _play(b64=b64):
                             try:
+                                import base64
+                                import io
+                                import wave
+                                import numpy as np
                                 audio_bytes = base64.b64decode(b64)
-                                bio = io.BytesIO(audio_bytes)
-                                sr, data = wavfile.read(bio)
-                                self.speaker._play_audio(data, sr)
+                                with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+                                    sr = wav_file.getframerate()
+                                    frames = wav_file.readframes(wav_file.getnframes())
+                                data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+                                self.speaker.play(data, sr)
                             except Exception as e:
                                 logger.error(f"Client audio error: {e}")
                         threading.Thread(target=_play, daemon=True).start()

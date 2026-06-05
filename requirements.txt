@@ -7,3 +7,6 @@ chromadb
 ollama
 pydub
 requests
+fastapi
+uvicorn
+httpx

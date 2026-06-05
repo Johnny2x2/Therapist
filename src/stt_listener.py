@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import queue
 import tempfile
+import threading
 import wave
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 
@@ -14,7 +15,9 @@ from .config import AppConfig
 @dataclass
 class TranscriptChunk:
     text: str
-    audio_path: str
+    audio_path: Optional[str] = None
+    mime_type: Optional[str] = "audio/wav"
+    duration_seconds: Optional[float] = 0.0
 
 
 class SpeechListener:
@@ -47,7 +50,11 @@ class SpeechListener:
         if self._vad_model is None:
             self._vad_model = load_silero_vad()
 
-    def capture_once(self) -> TranscriptChunk:
+    def capture_once(
+        self,
+        stop_event: Optional[threading.Event] = None,
+        on_ready: Optional[Callable[[], None]] = None,
+    ) -> TranscriptChunk:
         self._load_dependencies()
         print("Speak now. Recording will stop after a short pause.")
         frames = []
@@ -67,11 +74,15 @@ class SpeechListener:
             dtype="float32",
             callback=callback,
         ):
+            if on_ready:
+                on_ready()
             start_time = time.time()
             is_speaking = False
             silence_start = None
             
             while time.time() - start_time < self.config.audio.max_record_seconds:
+                if stop_event and stop_event.is_set():
+                    break
                 self.sounddevice.sleep(100)
                 if not frames:
                     continue
@@ -104,4 +115,10 @@ class SpeechListener:
             beam_size=1,
         )
         text = " ".join(segment.text.strip() for segment in segments).strip()
-        return TranscriptChunk(text=text, audio_path=temp_file.name)
+        duration = len(audio) / self.config.audio.sample_rate
+        return TranscriptChunk(
+            text=text,
+            audio_path=temp_file.name,
+            mime_type="audio/wav",
+            duration_seconds=duration,
+        )

@@ -27,6 +27,7 @@ class TextSpeaker:
         self._sounddevice = None
         self._lock = threading.Lock()
         self._failed = False
+        self._stop_requested = False
 
     def _load_dependencies(self) -> bool:
         if self._failed:
@@ -59,23 +60,61 @@ class TextSpeaker:
             return
         if not self._load_dependencies():
             return
+        self._stop_requested = False
         for sentence in split_sentences(text):
+            if self._stop_requested:
+                break
             try:
                 self._speak_sentence(sentence)
             except Exception as exc:
                 logger.warning("TTS playback failed for one sentence (%s); skipping.", exc)
 
+    def stop(self) -> None:
+        """Signal any in-progress playback to stop. Best-effort and non-fatal."""
+        self._stop_requested = True
+        if self._sounddevice is not None:
+            try:
+                self._sounddevice.stop()
+            except Exception:
+                pass
+
     def _speak_sentence(self, sentence: str) -> None:
+        result = self.synthesize(sentence)
+        if result is None:
+            return
+        data, sample_rate = result
+        self.play(data, sample_rate)
+
+    def synthesize(self, text: str):
+        """Synthesize speech for ``text`` without playing it.
+
+        Returns ``(np.ndarray, sample_rate)`` ready for playback, or ``None``
+        when TTS is unavailable. Used by the API server to stream audio.
+        """
+        if not text or not text.strip():
+            return None
+        if not self._load_dependencies():
+            return None
         wav, _duration = self._tts.synthesize(
-            sentence,
+            text,
             voice_style=self._style,
             lang=self.config.audio.tts_language,
         )
-        data, sample_rate = self._to_playable(wav)
-        if data.ndim == 1:
-            channels = 1
-        else:
-            channels = data.shape[1]
+        return self._to_playable(wav)
+
+    def play(self, data, sample_rate) -> None:
+        """Play already-synthesized PCM audio through the default output device."""
+        data = np.asarray(data)
+        if data.dtype != np.float32:
+            if np.issubdtype(data.dtype, np.integer):
+                max_val = float(np.iinfo(data.dtype).max) or 1.0
+                data = data.astype(np.float32) / max_val
+            else:
+                data = data.astype(np.float32)
+        if self._sounddevice is None:
+            import sounddevice as sounddevice_module
+            self._sounddevice = sounddevice_module
+        channels = 1 if data.ndim == 1 else data.shape[1]
         with self._sounddevice.OutputStream(
             samplerate=int(sample_rate),
             channels=channels,

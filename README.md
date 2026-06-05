@@ -26,7 +26,7 @@ At a high level, the application does five things:
 
 The default model assignments are:
 
-- Therapist model: `wmb/llamasupport:latest`
+- Therapist model: `tripolskypetr/qwen3.5-uncensored-aggressive:9b`
 - Safety model: `nemotron-mini:4b-instruct-q8_0`
 - Embedding model: `nomic-embed-text:latest`
 - Speech-to-text model: `distil-large-v3` through `faster-whisper`
@@ -64,7 +64,7 @@ Important current limitation:
 ### 2. Pull the required Ollama models
 
 ```powershell
-ollama pull wmb/llamasupport:latest
+ollama pull tripolskypetr/qwen3.5-uncensored-aggressive:9b
 ollama pull nemotron-mini:4b-instruct-q8_0
 ollama pull nomic-embed-text:latest
 ```

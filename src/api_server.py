@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .main import TherapistApp
-from .tts_speaker import split_tts_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ app = FastAPI(title="Therapist API")
 def get_app(session_id: str) -> TherapistApp:
     if session_id not in _SESSIONS:
         logger.info(f"Creating new TherapistApp for session {session_id}")
-        config = AppConfig()
+        config = AppConfig.load()
         # Ensure it works in backend mode
         app_inst = TherapistApp(config)
         app_inst.session_id = session_id
@@ -72,28 +71,31 @@ async def chat_stream_generator(req: ChatRequest) -> AsyncGenerator[str, None]:
     class AudioCaptureSpeaker:
         def __init__(self, original_speaker):
             self._speaker = original_speaker
-            self.backend = getattr(original_speaker, "_backend", "supertonic")
-        
-        def synthesize_and_emit(self, text: str):
-            if not text.strip(): return
-            try:
-                # Need to load dependencies and synthesize chunk
-                if getattr(self._speaker, "_load_dependencies", lambda: False)():
-                    data, sr = self._speaker._synthesize_chunk(text)
-                    # Convert data to base64 bytes
-                    import io
-                    import scipy.io.wavfile as wavfile
-                    import numpy as np
-                    
-                    # Convert to int16 before saving using scipy, or save as float32
-                    if data.dtype == np.float32:
-                        # scale if needed, actually scipy wavfile supports float32
-                        pass
 
-                    out_f = io.BytesIO()
-                    wavfile.write(out_f, sr, data)
-                    b64 = base64.b64encode(out_f.getvalue()).decode('utf-8')
-                    sync_q.put({"type": "audio", "data": b64, "text": text})
+        def synthesize_and_emit(self, text: str):
+            if not text.strip():
+                return
+            try:
+                result = self._speaker.synthesize(text)
+                if result is None:
+                    return
+                data, sr = result
+                import io
+                import wave
+                import numpy as np
+
+                pcm = np.asarray(data)
+                if pcm.ndim > 1:
+                    pcm = pcm.reshape(pcm.shape[0], -1)[:, 0]
+                pcm = np.clip(pcm.astype(np.float32), -1.0, 1.0)
+                out_f = io.BytesIO()
+                with wave.open(out_f, "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(int(sr))
+                    wav_file.writeframes((pcm * 32767).astype(np.int16).tobytes())
+                b64 = base64.b64encode(out_f.getvalue()).decode("utf-8")
+                sync_q.put({"type": "audio", "data": b64, "text": text})
             except Exception as e:
                 logger.error(f"TTS Capture Error: {e}")
 
