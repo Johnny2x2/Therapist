@@ -138,6 +138,44 @@ class TherapistApp:
         except Exception:
             pass
 
+    def restore_session(self, session_id: str) -> bool:
+        """Resume an existing session by id, replaying its persisted transcript.
+
+        Points the app at ``session_id``'s ``.partial.jsonl`` on disk, reloads the
+        turn log into ``self.transcript``, and replays the user/assistant turns
+        into the live engine state so the model regains the running conversation.
+        Returns ``True`` when prior turns were restored. Safe to call on a fresh
+        worker (returns ``False`` when no transcript exists yet).
+        """
+        with self._lock:
+            self.session_id = session_id
+            self._partial_path = self.config.session_dir / f"{session_id}.partial.jsonl"
+            if not self._partial_path.exists():
+                return False
+            restored: List[TurnRecord] = []
+            try:
+                for raw in self._partial_path.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    restored.append(TurnRecord(
+                        role=data.get("role", ""),
+                        content=data.get("content", ""),
+                        timestamp=data.get("timestamp", _now_iso()),
+                        safety=data.get("safety"),
+                        surfaced_note_ids=data.get("surfaced_note_ids") or [],
+                    ))
+            except Exception:
+                return False
+            if not restored:
+                return False
+            self.transcript = restored
+            for turn in restored:
+                if turn.role in ("user", "assistant") and turn.content:
+                    self.engine.state.append(turn.role, turn.content)
+            return True
+
     # ------------------------------------------------------------------ loops
     def run_text_loop(self) -> None:
         print("Therapist engine ready. Type 'quit' to exit.")

@@ -162,5 +162,8 @@ async def chat_endpoint(req: ChatRequest):
     return StreamingResponse(chat_stream_generator(req), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("THERAPIST_API_HOST", "0.0.0.0")
+    port = int(os.getenv("THERAPIST_API_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

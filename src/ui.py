@@ -614,7 +614,11 @@ class DesktopUI:
 
 def launch_desktop_ui(seed_memory: str = "feeling overwhelmed") -> None:
     config = AppConfig.load()
-    if getattr(config, 'backend_url', None):
+    import os
+    if os.getenv("THERAPIST_RUNPOD_ENDPOINT_ID"):
+        from .runpod_client import RunPodTherapistApp
+        app = RunPodTherapistApp(config)
+    elif getattr(config, 'backend_url', None):
         from .api_client import RemoteTherapistApp
         app = RemoteTherapistApp(config)
     else:

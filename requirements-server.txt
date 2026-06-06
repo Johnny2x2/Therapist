@@ -1,0 +1,9 @@
+# Server-only dependencies for the RunPod serverless worker.
+# STT (sounddevice/faster-whisper/silero-vad) runs on the local client, so it
+# is intentionally omitted here to keep the image small and headless-friendly.
+numpy
+supertonic
+chromadb
+ollama
+requests
+runpod

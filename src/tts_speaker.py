@@ -38,14 +38,20 @@ class TextSpeaker:
             if self._tts is not None:
                 return True
             try:
-                import sounddevice as sounddevice_module
                 from supertonic import TTS
             except ImportError as exc:
                 logger.warning("TTS dependencies missing (%s); voice output disabled.", exc)
                 self._failed = True
                 return False
+            # sounddevice is only needed for local playback (play()); server-side
+            # synthesis (synthesize()) works headless without it.
             try:
+                import sounddevice as sounddevice_module
                 self._sounddevice = sounddevice_module
+            except Exception as exc:  # noqa: BLE001 - headless/no PortAudio is fine
+                logger.info("sounddevice unavailable (%s); playback disabled, synth still works.", exc)
+                self._sounddevice = None
+            try:
                 tts = TTS(auto_download=True)
                 self._style = tts.get_voice_style(voice_name=self.config.audio.voice_name)
                 self._tts = tts

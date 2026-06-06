@@ -8,7 +8,7 @@ from typing import Dict, List
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = ROOT_DIR / "prompts"
-DATA_DIR = ROOT_DIR / ".data"
+DATA_DIR = Path(os.getenv("THERAPIST_DATA_DIR", str(ROOT_DIR / ".data"))).expanduser()
 
 
 def _read_prompt(path: Path, fallback: str) -> str:
@@ -89,7 +89,7 @@ class AppConfig:
     profile: str = field(default_factory=lambda: os.getenv("THERAPIST_PROFILE", "default"))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
     backend_url: str = field(default_factory=lambda: os.getenv("THERAPIST_BACKEND_URL", ""))
-    data_dir: Path = field(default_factory=lambda: DATA_DIR)
+    data_dir: Path = field(default_factory=lambda: Path(os.getenv("THERAPIST_DATA_DIR", str(DATA_DIR))).expanduser())
     session_dir: Path = field(init=False)
     chroma_dir: Path = field(init=False)
     notebook_dir: Path = field(init=False)

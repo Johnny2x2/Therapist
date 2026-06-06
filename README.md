@@ -117,3 +117,4 @@ The voice entrypoint exists, but it only works once the speech dependencies are 
 
 - Usage guide: [docs/USAGE.md](docs/USAGE.md)
 - Architecture and internal flow: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- RunPod serverless deployment: [docs/RUNPOD_DEPLOYMENT.md](docs/RUNPOD_DEPLOYMENT.md)
